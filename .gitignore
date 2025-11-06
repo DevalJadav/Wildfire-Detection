@@ -1,0 +1,8 @@
+*.asv
+*.fig
+*.m~
+*.tmp
+/results/*
+.venv/
+__pycache__/
+data/
