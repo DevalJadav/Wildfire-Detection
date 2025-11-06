@@ -6,9 +6,6 @@ This repository contains all source code, documentation, and reporting files for
 
 ---
 
-
----
-
 ## Dataset
 
 The main wildfire dataset is **not included** in this repository due to its large size (116GB).
