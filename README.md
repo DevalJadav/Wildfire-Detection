@@ -6,15 +6,6 @@ This repository contains all source code, documentation, and reporting files for
 
 ---
 
-## Project Structure
-
-wildfire-detection-coursework/
-├── code/ # MATLAB scripts for data handling, feature extraction, modeling
-├── report/ # Coursework templates, rubric, reports
-├── results/ # Output plots, metrics, analysis results
-├── data/ # [Local only] Dataset (see below)
-├── README.md # This documentation file
-
 
 ---
 
