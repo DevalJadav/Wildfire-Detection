@@ -1,87 +1,105 @@
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% REAL-TIME WILDFIRE DETECTION SIMULATION (PER-FRAME SVM)
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% REAL-TIME WILDFIRE DETECTION SIMULATION (CPU-Only)
+clc; clear; close all;
 
-clear; clc; close all;
+%% Load trained model and normalization parameters
+load('wildfire_pipeline_outputs.mat', ...
+     'SVMModel','mu','sigma','quantLevels','coeff');
 
-%% --- Load trained per-frame SVM ---
-fprintf('Loading trained per-frame SVM...\n');
-load('per_frame_SVM.mat', 'SVMPosterior', 'mu', 'sigma', 'quantLevels');
+dataDir = 'Wildfire_Dataset\subset_B_videos\all_videos'; % Folder with videos
+videoList = dir(fullfile(dataDir, '*.mp4'));
+numVideos = numel(videoList);
 
-%% --- Video setup ---
-videoPath = 'Wildfire_Dataset\subset_B_videos\all_videos\heinola_1.mp4';
-vidObj = VideoReader(videoPath);
-resizeTo = [224 224];
-
-frameCount = 0;
-prevFeat = [];
-
-%% --- Visualization setup ---
-figure('Name','Wildfire Detection Simulation','NumberTitle','off');
-subplot(2,1,1);
-frameDisplay = imshow(zeros([resizeTo 3],'uint8'));
-title('Video Frame');
-
-subplot(2,1,2);
-confPlot = animatedline('Color','r','LineWidth',2);
-ylim([0 1]); grid on;
-xlabel('Frame'); ylabel('Fire Confidence');
-title('Fire Detection Confidence (SVM)');
-
-%% --- Process frames ---
-fprintf('Running simulation on video: %s\n', videoPath);
-
-while hasFrame(vidObj)
-    frameCount = frameCount + 1;
-    frame = readFrame(vidObj);
-    frame = imresize(frame, resizeTo);
-
-    % --- Extract features ---
-    feat = extract_features(frame, quantLevels);
-
-    % --- Delta from previous frame ---
-    if isempty(prevFeat)
-        deltaFeat = zeros(size(feat));
-    else
-        deltaFeat = feat - prevFeat;
-    end
-    prevFeat = feat;
-
-    % --- Combined feature vector ---
-    Xnew = [feat, deltaFeat];
-
-    % --- Normalize ---
-    if length(Xnew) ~= length(mu)
-        error('Feature length mismatch! Xnew=%d, mu=%d', length(Xnew), length(mu));
-    end
-    XnewZ = (Xnew - mu) ./ sigma;
-
-    % --- Predict probability ---
-    [~, score] = predict(SVMPosterior, XnewZ);
-
-    % Safe indexing for 'Fire'
-    if iscell(SVMPosterior.ClassNames)
-        fireIdx = find(strcmp(SVMPosterior.ClassNames, 'Fire'));
-    else
-        fireIdx = find(SVMPosterior.ClassNames == 'Fire');
-    end
-    if isempty(fireIdx)
-        conf = 0;
-    else
-        conf = score(:, fireIdx);
-    end
-
-    % --- Visualization ---
-    set(frameDisplay, 'CData', frame);
-    addpoints(confPlot, frameCount, conf);
-    drawnow limitrate;
-
-    % --- Alert ---
-    if conf > 0.7
-        sgtitle(sprintf('🔥 Fire Detected! Confidence: %.2f', conf), 'Color', 'r');
-    else
-        sgtitle(sprintf('No Fire (Conf: %.2f)', conf), 'Color', 'k');
-    end
+if numVideos == 0
+    error("No videos found in folder: %s", dataDir);
 end
 
-fprintf('Simulation completed on %d frames.\n', frameCount);
+rng(1);
+sel = randperm(numVideos, min(5, numVideos)); % choose up to 5 random videos
+resizeTo = [112 112];
+windowSize = 5; % number of frames for rolling average
+fprintf("Starting real-time simulation on %d random videos...\n", length(sel));
+
+%% Loop through selected videos
+for v = 1:length(sel)
+    vidName = videoList(sel(v)).name;
+    vidPath = fullfile(dataDir, vidName);
+    fprintf("Playing video: %s\n", vidName);
+
+    vr = VideoReader(vidPath);
+    hFig = figure('Name', sprintf('Wildfire Detection - %s', vidName), ...
+                  'NumberTitle','off','Color','w');
+    hAx1 = subplot(1,2,1); title(hAx1,'Frame');
+    hAx2 = subplot(1,2,2); title(hAx2,'Confidence (Smoke)');
+    confPlot = animatedline('Parent',hAx2, 'Color','r','LineWidth',2);
+    ylim(hAx2,[0 1]); xlim(hAx2,[0 inf]);
+    xlabel(hAx2,'Frame'); ylabel(hAx2,'Confidence');
+
+    frameCount = 0;
+    featureBuffer = [];
+    tic;
+
+    %% Process video frames
+    while hasFrame(vr)
+        frame = readFrame(vr);
+        frame = imresize(frame, resizeTo);
+        frameCount = frameCount + 1;
+
+        % --- Extract per-frame features ---
+        feat = extract_features(frame, quantLevels);
+
+        % Ensure correct feature vector length
+        if isempty(feat)
+            continue;
+        elseif length(feat) < length(mu)/2
+            % Pad features if needed
+            feat = [feat, zeros(1, length(mu)/2 - length(feat))];
+        elseif length(feat) > length(mu)/2
+            % Truncate if too long
+            feat = feat(1:length(mu)/2);
+        end
+
+        % --- Update rolling buffer ---
+        featureBuffer = [featureBuffer; feat];
+        if size(featureBuffer,1) > windowSize
+            featureBuffer(1,:) = [];
+        end
+
+        % --- Aggregate mean + std (same as training) ---
+        meanFeat = mean(featureBuffer,1);
+        stdFeat  = std(featureBuffer,0,1);
+        aggFeat = [meanFeat, stdFeat];
+
+        % --- Normalize and apply PCA ---
+        aggFeatZ = (aggFeat - mu) ./ sigma;
+        framePCA = aggFeatZ * coeff(:,1:25);
+
+        % --- Predict smoke/fire ---
+        [label, score] = predict(SVMModel, framePCA);
+
+        % --- Extract confidence for positive class ---
+        if iscell(SVMModel.ClassNames)
+            fireIdx = find(strcmp(SVMModel.ClassNames, '1') | strcmpi(SVMModel.ClassNames, 'true'));
+            if isempty(fireIdx), fireIdx = 2; end
+        else
+            fireIdx = 2;
+        end
+        conf = score(:, fireIdx);
+
+        % --- Visualization ---
+        imshow(frame, 'Parent', hAx1);
+        if label
+            title(hAx1, sprintf('🔥 Smoke Detected | Frame %d | Conf: %.2f', frameCount, conf), 'Color','r');
+        else
+            title(hAx1, sprintf('No Smoke | Frame %d | Conf: %.2f', frameCount, conf), 'Color','k');
+        end
+        addpoints(confPlot, frameCount, conf);
+
+        if mod(frameCount, 5) == 0
+            drawnow limitrate;
+        end
+    end
+
+    fprintf("Finished %s in %.2f sec\n", vidName, toc);
+end
+
+fprintf("✅ Real-time simulation complete.\n");

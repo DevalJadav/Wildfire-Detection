@@ -1,72 +1,54 @@
 function feat = extract_features(frame, quantLevels)
-% EXTRACT_FEATURES Extract per-frame features for wildfire detection.
-% Inputs:
-%   frame - RGB image resized to target size
-%   quantLevels - number of gray quantization levels for GLCM-like features
-% Output:
-%   feat - row vector of features (22 features)
+    %% Step 1: Convert and normalize input
+    frame = im2double(frame);  % convert to [0,1]
+    if size(frame,3) == 1
+        frame = repmat(frame, [1 1 3]); % ensure RGB
+    end
 
-if nargin < 2
-    quantLevels = 16; % default quantization if not provided
-end
+    %% Step 2: Color-based features
+    meanRGB = mean(reshape(frame, [], 3));
+    stdRGB  = std(reshape(frame, [], 3));
 
-% -------------------- Color Stats (HSV) --------------------
-hsvF = rgb2hsv(frame);
-H = hsvF(:,:,1); S = hsvF(:,:,2); V = hsvF(:,:,3);
-meanH = mean(H(:)); stdH = std(H(:));
-meanS = mean(S(:)); stdS = std(S(:));
-meanV = mean(V(:)); stdV = std(V(:));
+    hsvFrame = rgb2hsv(frame);
+    meanHSV = mean(reshape(hsvFrame, [], 3));
+    stdHSV  = std(reshape(hsvFrame, [], 3));
 
-% -------------------- Grayscale --------------------
-gray = double(rgb2gray(frame));
+    %% Step 3: Texture features (GLCM)
+    grayFrame = im2uint8(rgb2gray(frame));
+    glcm = zeros(quantLevels, quantLevels);
+    step = floor(256 / quantLevels);
+    for i = 1:size(grayFrame,1)
+        for j = 1:size(grayFrame,2)-1
+            r = floor(double(grayFrame(i,j))/step) + 1;
+            c = floor(double(grayFrame(i,j+1))/step) + 1;
+            r = min(r, quantLevels); c = min(c, quantLevels);
+            glcm(r,c) = glcm(r,c) + 1;
+        end
+    end
+    glcm = glcm / sum(glcm(:)) + eps;
 
-% -------------------- Manual GLCM Features --------------------
-[glcmContrast, glcmHomog, glcmEnergy, glcmEntropy] = manual_glcm(gray, quantLevels);
+    [x,y] = meshgrid(1:quantLevels,1:quantLevels);
+    contrast = sum(sum((x-y).^2 .* glcm));
+    energy = sum(glcm(:).^2);
+    homogeneity = sum(sum(glcm ./ (1 + abs(x-y))));
+    mu_x = sum(sum(x .* glcm)); mu_y = sum(sum(y .* glcm));
+    sigma_x = sqrt(sum(sum((x - mu_x).^2 .* glcm)));
+    sigma_y = sqrt(sum(sum((y - mu_y).^2 .* glcm)));
+    corr = sum(sum(((x - mu_x).*(y - mu_y).*glcm))) / (sigma_x*sigma_y + eps);
+    texFeat = [contrast, corr, energy, homogeneity];
 
-% -------------------- DCT Energy (Low-frequency emphasis) --------------------
-D = dct2(gray);
-sz = min(8, size(D,1));
-dctBlock = D(1:sz, 1:sz);
-dctEnergy = sum(abs(dctBlock(:)));
+    %% Step 4: Frequency features
+    F = fft2(double(grayFrame));
+    freqEnergy = sum(abs(F(:)).^2) / numel(F);
 
-% -------------------- Simple HoG-like Edge Histogram --------------------
-[Gx, Gy] = gradient(gray);
-orient = atan2(Gy, Gx); 
-mag = sqrt(Gx.^2 + Gy.^2);
+    %% Step 5: Edge features
+    lap = [0 -1 0; -1 4 -1; 0 -1 0];
+    edgeResp = conv2(double(grayFrame), lap, 'same');
+    edgeVar = var(edgeResp(:));
 
-numBins = 8;
-angles = linspace(-pi, pi, numBins+1);
-hogHist = zeros(1,numBins);
-for b = 1:numBins
-    mask = orient >= angles(b) & orient < angles(b+1);
-    hogHist(b) = sum(mag(mask));
-end
+    %% Step 6: Combine features
+    feat = [meanRGB, stdRGB, meanHSV, stdHSV, texFeat, freqEnergy, edgeVar];
 
-[topVal, ~] = max(hogHist);
-hogEntropy = -sum((hogHist/sum(hogHist+eps)).*log2((hogHist+eps)/sum(hogHist+eps)));
-
-% -------------------- Pixel Intensity Entropy --------------------
-p = imhist(uint8(gray))/numel(gray);
-p(p==0) = [];
-pixEnt = -sum(p.*log2(p));
-
-% -------------------- Laplacian Variance --------------------
-lap = [0 -1 0; -1 4 -1; 0 -1 0];
-edgeResp = conv2(gray, lap, 'same'); 
-lapVar = var(edgeResp(:));
-
-% -------------------- Combine Features --------------------
-feat = [meanH, stdH, meanS, stdS, meanV, stdV, ...
-        glcmContrast, glcmHomog, glcmEnergy, glcmEntropy, ...
-        dctEnergy, topVal, hogEntropy, pixEnt, lapVar];
-
-% -------------------- Pad to 22 Features --------------------
-while numel(feat) < 22
-    feat = [feat, 0];
-end
-
-% -------------------- Debug (optional) --------------------
-% fprintf('Extracted features: ');
-% disp(feat);
-
+    %% Step 7: Clean feature vector
+    feat(~isfinite(feat)) = 0;
 end
